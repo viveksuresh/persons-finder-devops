@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: persons-finder
+  namespace: default
+  labels:
+    app: persons-finder
+  annotations:
+    # Nginx ingress controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # Enable CORS if needed
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    # Rate limiting (optional)
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: persons-finder.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: persons-finder
+            port:
+              name: http
+  # TLS configuration (uncomment when certificate is available)
+  # tls:
+  # - hosts:
+  #   - persons-finder.local
+  #   secretName: persons-finder-tls
