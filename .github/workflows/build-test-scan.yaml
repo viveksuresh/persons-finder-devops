@@ -368,11 +368,9 @@ jobs:
             tag_latest: true
             condition: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
-    # Determine if this job should run based on branch and environment
-    if: |
-      (matrix.environment == 'dev' && github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
-      (matrix.environment == 'uat' && github.ref == 'refs/heads/uat' && github.event_name == 'push') ||
-      (matrix.environment == 'prod' && github.ref == 'refs/heads/main' && github.event_name == 'push')
+    # Note: job-level `if` cannot reference `matrix` (evaluated before strategy).
+    # We intentionally run the matrix and gate the actual push step below
+    # using an `if` that can reference matrix variables.
     
     steps:
       # Get the source code from the repository
@@ -415,6 +413,7 @@ jobs:
       # Critical: Uses JAR from build job artifact, NOT rebuilding
       # This ensures chain of custody: same code tested, scanned, then pushed
       - name: Build and push to ${{ matrix.environment }} registry
+        if: ${{ (matrix.environment == 'dev' && github.ref == 'refs/heads/develop' && github.event_name == 'push') || (matrix.environment == 'uat' && github.ref == 'refs/heads/uat' && github.event_name == 'push') || (matrix.environment == 'prod' && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
         uses: docker/build-push-action@0a97817b6ade9f46837855d676d2d01e5ebe2c8c # v5.1.0
         with:
           context: .
