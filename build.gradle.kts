@@ -11,6 +11,11 @@ group = "com.persons.finder"
 version = "0.0.1-SNAPSHOT"
 java.sourceCompatibility = JavaVersion.VERSION_11
 
+// Explicit main class for Spring Boot jar (resolves CI / Docker build resolution issues)
+springBoot {
+	mainClass.set("com.persons.finder.ApplicationStarterKt")
+}
+
 repositories {
 	mavenCentral()
 }

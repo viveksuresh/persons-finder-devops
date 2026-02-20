@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.iml
+*.swp
+*.swo
+
+# Documentation
+README.md
+HELP.md
+ARCHITECTURE.md
+AI_LOG.md
+
+# Build artifacts
+.gradle
+build
+*.log
+target
+gradle/wrapper/dists/
+.gradle/
+
+# OS
+.DS_Store
+Thumbs.db
