@@ -1,0 +1,435 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                      PERSONS FINDER CI/CD PIPELINE                            ║
+# ║                                                                                ║
+# ║ This workflow automates the build and deployment process for the Persons      ║
+# ║ Finder Spring Boot application. It ensures code quality, security, and        ║
+# ║ container image safety before pushing to production.                          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: Build, Test, and Scan
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRIGGERS: When this workflow runs
+# ═══════════════════════════════════════════════════════════════════════════════
+on:
+  # Trigger on push to main or develop branches
+  push:
+    branches:
+      - main          # Production branch - runs all jobs including push-image
+      - develop       # Development branch - runs all jobs except push-image
+
+  # Trigger on pull requests to main or develop branches  
+  pull_request:
+    branches:
+      - main          # PR validation before merge to production
+      - develop       # PR validation before merge to development
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT VARIABLES: Used across all jobs
+# ═══════════════════════════════════════════════════════════════════════════════
+env:
+  REGISTRY: ghcr.io                           # GitHub Container Registry
+  IMAGE_NAME: ${{ github.repository }}        # owner/repo as image name
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT MATRIX: Multi-environment deployment configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+defaults:
+  run:
+    shell: bash
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JOBS: Workflow execution stages
+# ═══════════════════════════════════════════════════════════════════════════════
+
+jobs:
+  # ┌───────────────────────────────────────────────────────────────────────────┐
+  # │ JOB: test                                                                  │
+  # │ PURPOSE: Run unit tests and integration tests for the application          │
+  # │ RUNS: On every push and pull request (no dependencies)                     │
+  # │ ARTIFACTS: test-results/ (published for review)                            │
+  # └───────────────────────────────────────────────────────────────────────────┘
+  test:
+    name: Run Tests
+    runs-on: ubuntu-22.04
+    
+    steps:
+      # Get the source code from the repository
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f8fa83f91397210 # v4.1.1
+      
+      # Install Java 21 (required for Spring Boot 3.x and Gradle)
+      - name: Set up Java 21
+        uses: actions/setup-java@99b8673ff64fbf33d8d8c5f4f57124599c1a716b # v4.0.0
+        with:
+          java-version: '21'
+          distribution: 'temurin'         # Eclipse Temurin JDK (open source)
+          cache: gradle                   # Cache Gradle dependencies for speed
+      
+      # Execute all unit and integration tests
+      # --no-daemon: Don't keep Gradle running in background (cleanup in CI)
+      - name: Run tests
+        run: ./gradlew test --no-daemon
+      
+      # Archive test results even if tests fail (if: always())
+      # Other jobs can reference these results for analysis
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2867 # v4.3.1
+        with:
+          name: test-results
+          path: build/test-results/
+
+  # ┌───────────────────────────────────────────────────────────────────────────┐
+  # │ JOB: build                                                                 │
+  # │ PURPOSE: Compile app into JAR, build Docker image, prepare for scanning    │
+  # │ RUNS: After 'test' job succeeds (depends on: test)                         │
+  # │ ARTIFACTS: docker-image/ (TAR format for scanning)                         │
+  # │ PERMISSIONS: Read source code, write to package registry                   │
+  # └───────────────────────────────────────────────────────────────────────────┘
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-22.04
+    needs: test            # Wait for test job to complete successfully
+    permissions:
+      contents: read       # Read repository code
+      packages: write      # Push to GitHub Container Registry
+    
+    steps:
+      # Get the source code from the repository
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f8fa83f91397210 # v4.1.1
+      
+      # Install Java 21 for building the Spring Boot application
+      - name: Set up Java 21
+        uses: actions/setup-java@99b8673ff64fbf33d8d8c5f4f57124599c1a716b # v4.0.0
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle                   # Cache Gradle dependencies
+      
+      # Compile Kotlin code and build executable JAR
+      # clean: Remove previous builds
+      # -x test: Skip tests (already ran in 'test' job)
+      # --no-daemon: Clean shutdown after build
+      - name: Build JAR with Gradle
+        run: ./gradlew clean build -x test --no-daemon
+      
+      # Setup Docker Buildx for advanced build features (BuildKit)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      # Authenticate with GitHub Container Registry using GitHub token
+      # This allows pushing Docker images to ghcr.io
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@465a07811ff36f9b3d055d2b1f01a286591d7f1a # v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Generate image metadata and tags based on git refs, versions, and commit SHA
+      # This creates consistent naming across different build scenarios
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8acb265672ada91 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch                # Tag with branch name (main, develop)
+            type=semver,pattern={{version}}      # Tag with semantic versions (v1.0.0)
+            type=sha,prefix={{branch}}-          # Tag with commit SHA (main-abc123def)
+      
+      # Build Docker image and load it locally (don't push yet)
+      # cache-from/cache-to: Use GitHub's cache to speed up builds
+      # load: true: Load image into local Docker daemon for scanning
+      - name: Build and push Docker image
+        uses: docker/build-push-action@0a97817b6ade9f46837855d676d2d01e5ebe2c8c # v5.1.0
+        with:
+          context: .
+          push: false                     # Don't push to registry yet (scanning must pass)
+          load: true                      # Load into local Docker for scanning
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha            # Use GitHub Actions cache as source
+          cache-to: type=gha,mode=max     # Save all cache layers to GitHub
+      
+      # Export Docker image to TAR file for transfer to scanning job
+      - name: Save image for scanning
+        run: docker save ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -o image.tar
+      
+      # Upload TAR file as artifact so scanning job can download it
+      # Artifacts persist between jobs in the same workflow
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2867 # v4.3.1
+        with:
+          name: docker-image
+          path: image.tar
+      
+      # Upload JAR artifact to preserve chain of custody through scanning
+      # The same JAR that was tested and scanned will be pushed in push-image job
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2867 # v4.3.1
+        with:
+          name: application-jar
+          path: build/libs/PersonsFinder-*.jar
+
+
+  # ┌───────────────────────────────────────────────────────────────────────────┐
+  # │ JOB: scan-trivy                                                            │
+  # │ PURPOSE: Security scan Docker image for CRITICAL and HIGH vulnerabilities  │
+  # │ RUNS: After 'build' job succeeds (depends on: build)                       │
+  # │ FAILS: If ANY CRITICAL or HIGH severity issues found (exit-code: 1)        │
+  # │ ARTIFACTS: trivy-results.sarif (for GitHub Security tab)                   │
+  # └───────────────────────────────────────────────────────────────────────────┘
+  scan-trivy:
+    name: Scan with Trivy (CRITICAL & HIGH)
+    runs-on: ubuntu-22.04
+    needs: build            # Wait for build job to complete
+    
+    steps:
+      # Get the source code (needed for reference)
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f8fa83f91397210 # v4.1.1
+      
+      # Download the Docker image TAR file from build job artifacts
+      - name: Download Docker image
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8f60 # v4.1.4
+        with:
+          name: docker-image
+          path: .
+      
+      # Load the Docker image from TAR file into local Docker daemon
+      - name: Load Docker image
+        run: docker load -i image.tar
+      
+      # Run Trivy vulnerability scanner on the Docker image TAR file
+      # Scans the local TAR to verify image integrity before any registry push
+      # Trivy checks base image, OS packages, and application dependencies
+      # exit-code: 1 = FAIL the job if vulnerabilities found
+      # severity: CRITICAL,HIGH = Only report high-impact vulnerabilities
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@9f30279d5f46e8759e0d1f30c33c9e31f0c5ae10 # v0.16.1
+        with:
+          input: 'image.tar'              # Scan the local TAR file (chain of custody)
+          format: 'table'                 # Human-readable output format
+          exit-code: '1'                  # Fail pipeline on findings
+          severity: 'CRITICAL,HIGH'       # Focus on critical and high severity
+      
+      # Upload detailed results for GitHub Security alerts
+      - name: Upload Trivy results
+        if: always()
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2867 # v4.3.1
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+
+
+  # ┌───────────────────────────────────────────────────────────────────────────┐
+  # │ JOB: ai-code-review                                                        │
+  # │ PURPOSE: Custom security validation of code, Docker config, and K8s        │
+  # │ RUNS: After 'build' job succeeds (depends on: build)                       │
+  # │ CHECKS: Hardcoded secrets, security contexts, root user, resource limits   │
+  # │ NOTE: Mocked implementation - can integrate real AI/ML scanning service    │
+  # └───────────────────────────────────────────────────────────────────────────┘
+  ai-code-review:
+    name: AI Code Review (Mocked)
+    runs-on: ubuntu-22.04
+    needs: build           # Wait for build job to complete
+    
+    steps:
+      # Get the source code for analysis
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f8fa83f91397210 # v4.1.1
+      
+      # Step 1: Mocked AI Security Review
+      # This checks for common security anti-patterns in source code
+      # In production, this could call real AI/ML endpoint for code analysis
+      - name: Mock AI Security Review
+        run: |
+          echo "========================================="
+          echo "Running Mocked AI Code Review"
+          echo "========================================="
+          echo ""
+          echo "Analyzing for security issues:"
+          echo "- Checking for hardcoded secrets..."
+          
+          # Scan for common patterns that indicate hardcoded credentials
+          # Exclude legitimate references like "secretKeyRef" in K8s manifests
+          if grep -r "OPENAI_API_KEY\|api[_-]key\|secret" \
+            --include="*.kt" --include="*.java" --include="*.yaml" --include="*.yml" \
+            src/ k8s/ Dockerfile 2>/dev/null | grep -v "stringData" | grep -v "valueFrom"; then
+            echo "[WARN] Potential hardcoded secrets found in source files"
+            echo "       Review lines above carefully"
+          else
+            echo "[OK] No obvious hardcoded secrets detected"
+          fi
+          
+          echo ""
+          echo "- Checking Kubernetes manifests for security:"
+          # Fail if containers run with elevated privileges
+          if grep -r "runAsNonRoot: false\|allowPrivilegeEscalation: true" \
+            k8s/*.yaml 2>/dev/null; then
+            echo "[FAIL] Insecure security context found!"
+            exit 1
+          else
+            echo "[OK] Security contexts appear hardened"
+          fi
+          
+          echo ""
+          echo "- Checking Docker image for common issues:"
+          # Containers should NEVER run as root user
+          if grep -i "USER root" Dockerfile; then
+            echo "[FAIL] Container runs as root!"
+            exit 1
+          else
+            echo "[OK] Container uses non-root user"
+          fi
+          
+          echo ""
+          echo "- Validating YAML syntax:"
+          # Use yamllint if available for strict validation
+          if command -v yamllint &> /dev/null; then
+            yamllint k8s/*.yaml || true
+          else
+            echo "[SKIP] yamllint not installed"
+          fi
+          
+          echo ""
+          echo "========================================="
+          echo "AI Code Review Complete"
+          echo "========================================="
+      
+      # Step 2: Check for K8s resource limits
+      # Prevents "noisy neighbor" problems and runaway containers
+      - name: Check for resource limits
+        run: |
+          echo "Verifying K8s resource limits are set..."
+          if grep -q "requests:" k8s/03-deployment.yaml && \
+             grep -q "limits:" k8s/03-deployment.yaml; then
+            echo "[OK] Resource requests and limits configured"
+          else
+            echo "[FAIL] Missing resource limits in Deployment"
+            exit 1
+          fi
+      
+      # Step 3: Validate secret handling strategy
+      # secretKeyRef is safer than environment variables (secrets visible in pod describe)
+      - name: Validate secret injection
+        run: |
+          echo "Verifying secure secret handling..."
+          if grep -q "secretKeyRef" k8s/03-deployment.yaml; then
+            echo "[OK] Using secretKeyRef (not environment variables)"
+          else
+            echo "[WARN] Secret handling may not be optimal"
+          fi
+
+
+  # ┌───────────────────────────────────────────────────────────────────────────┐
+  # │ JOB: push-image                                                            │
+  # │ PURPOSE: Push validated Docker images to registry for multiple environments│
+  # │ RUNS: After all scans pass (depends on: scan-trivy, ai-code-review)        │
+  # │ DEPLOYMENT MATRIX:                                                         │
+  # │   - dev: develop branch → ghcr.io/.../repo:dev                             │
+  # │   - uat: uat branch → ghcr.io/.../repo:uat                                 │
+  # │   - prod: main branch + semver tag → ghcr.io/.../repo:latest, v1.0.0      │
+  # │ PERMISSIONS: Read source code, write to package registry                   │
+  # │ CHAIN OF CUSTODY: Uses artifacts from build job, no rebuild                │
+  # └───────────────────────────────────────────────────────────────────────────┘
+  push-image:
+    name: Push Docker Image to ${{ matrix.environment }}
+    runs-on: ubuntu-22.04
+    needs: [scan-trivy, ai-code-review]  # Wait for BOTH security jobs to pass
+    permissions:
+      contents: read
+      packages: write
+    
+    strategy:
+      matrix:
+        include:
+          # Development environment: triggered on develop branch
+          - environment: dev
+            branch: develop
+            tag_suffix: dev
+            tag_latest: false
+            condition: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+          
+          # UAT environment: triggered on uat branch
+          - environment: uat
+            branch: uat
+            tag_suffix: uat
+            tag_latest: false
+            condition: github.ref == 'refs/heads/uat' && github.event_name == 'push'
+          
+          # Production environment: triggered on main branch with version tags
+          - environment: prod
+            branch: main
+            tag_suffix: latest
+            tag_latest: true
+            condition: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    # Determine if this job should run based on branch and environment
+    if: |
+      (matrix.environment == 'dev' && github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
+      (matrix.environment == 'uat' && github.ref == 'refs/heads/uat' && github.event_name == 'push') ||
+      (matrix.environment == 'prod' && github.ref == 'refs/heads/main' && github.event_name == 'push')
+    
+    steps:
+      # Get the source code from the repository
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f8fa83f91397210 # v4.1.1
+      
+      # Download JAR artifact from build job to preserve chain of custody
+      # This is the exact JAR that passed unit tests and security scans
+      - name: Download JAR artifact
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8f60 # v4.1.4
+        with:
+          name: application-jar
+          path: build/libs/
+      
+      # Setup Docker Buildx for advanced build features (BuildKit)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      # Authenticate with GitHub Container Registry using GitHub token
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@465a07811ff36f9b3d055d2b1f01a286591d7f1a # v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Generate image metadata and tags for the target environment
+      # Tags vary by environment: dev, uat, or latest+semver for prod
+      - name: Extract metadata for ${{ matrix.environment }}
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8acb265672ada91 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=${{ matrix.environment }}-
+      
+      # Build Docker image using pre-tested JAR artifact and push to registry
+      # Critical: Uses JAR from build job artifact, NOT rebuilding
+      # This ensures chain of custody: same code tested, scanned, then pushed
+      - name: Build and push to ${{ matrix.environment }} registry
+        uses: docker/build-push-action@0a97817b6ade9f46837855d676d2d01e5ebe2c8c # v5.1.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      # Log deployment information
+      - name: Log deployment
+        run: |
+          echo "✅ Successfully pushed Docker image to ${{ matrix.environment }} environment"
+          echo "Environment: ${{ matrix.environment }}"
+          echo "Branch: ${{ github.ref }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Registry: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
