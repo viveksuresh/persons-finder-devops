@@ -38,7 +38,7 @@ The app sends user PII (names, bios) to an external LLM provider.
 
 ---
 
-## 📝 Mandatory: The AI Log (`AI_LOG.md`)
+## 📝 Mandatory: The AI Log (`docs/ai/AI_LOG.md`)
 
 We hire engineers who know how to collaborate with machines.
 Please verify your work by documenting:
@@ -62,4 +62,4 @@ Please verify your work by documenting:
 Submit your repository link. We care about:
 *   **Security:** How you handle the API Key.
 *   **Reliability:** Probes, Limits, Scaling.
-*   **AI Maturity:** Your `AI_LOG.md` (Did you blindly trust the bot, or did you engineer it?).
+*   **AI Maturity:** Your `docs/ai/AI_LOG.md` (Did you blindly trust the bot, or did you engineer it?).
