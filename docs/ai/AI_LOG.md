@@ -289,3 +289,10 @@ springBoot {
 3. Understand your runtime environment (Java version, Kubernetes version, platform-specific quirks)
 4. Pin dependency versions (Docker actions, base images, packages)
 5. Document your fixes—this log validates engineering rigor
+
+
+## 8. Repository Restructure — Move deploy script and AI docs
+
+### Action
+Moved deployment script and AI documentation into organized folders to improve repository hygiene and make CI/infra artifacts easier to find.
+
